@@ -1,0 +1,77 @@
+- hosts: Main-standby    #被管理主机组，详情见/etc/ansible/hosts文件
+  vars:   #定义变量
+    - installation_package: openGauss-Lite-3.0.0-openEuler-x86_64.tar.gz  #安装包
+    - ansible_ip: 192.168.100.99  #ansible主机ip
+  tasks:
+    - name: Install dependencies packages    #安装依赖包
+      yum:
+        name:
+          - flex 
+          - bison 
+          - ncurses-devel 
+          - glibc-devel 
+          - patch 
+          - readline-devel 
+          - libaio-devel
+        state: present
+    - name: Modify system configuration      #修改系统环境
+      shell: |
+        systemctl stop firewalld.service     #关闭防火墙
+        systemctl disable firewalld.service
+        sed -i '/^SELINUX=.*/ c\SELINUX=disabled' /etc/selinux/config  #关闭selinux
+        echo "export LC_CTYPE=zh_CN.GB18030" >> /etc/profile    #统一字符集
+        echo "export LC_ALL=zh_CN.GB18030" >> /etc/profile
+        echo "export LANG=zh_CN.GB18030" >> /etc/profile
+        source /etc/profile
+        sed -i 's/^server/#server/g' /etc/chrony.conf           #时间同步
+        sed -i "/^#server 0.*/ i\server {{ ansible_ip }} iburst"  /etc/chrony.conf
+        systemctl restart chronyd.service
+        swapoff -a    #关闭交换内存
+        sed -i 's/^#RemoveIPC/RemoveIPC/' /etc/systemd/logind.conf  #关闭RemoveIPC
+        systemctl daemon-reload
+        systemctl restart systemd-logind
+        echo "500 641280 500 500" > /proc/sys/kernel/sem     #修改信号集参数
+    - name: Create omm user        #创建数据库专用用户
+      user:
+        name: omm
+        state: present
+    - name: Create installation directory   #创建数据目录和安装目录
+      shell: |
+        mkdir -p /home/omm/openGauss/data
+        mkdir -p /home/omm/openGauss/install
+    - name: Download opengauss-Lite package   #下载安装包
+      get_url: 
+        url: https://opengauss.obs.cn-south-1.myhuaweicloud.com/3.0.0/x86_openEuler/{{ installation_package }}
+        dest: /tmp/
+    - name: Decompression opengauss-Lite package  #解压安装包
+      unarchive:
+          src: /tmp/{{ installation_package }}
+          dest: /home/omm/openGauss/
+          copy: no
+    - name: Directory authorization       #进行目录权限的给与
+      shell: chown -R omm:omm /home/omm/openGauss/
+
+- hosts: master
+  vars:      #定义变量
+    - master_ip: 192.168.100.101  #主节点ip
+    - slave_ip: 192.168.100.102   #从节点ip
+    - master_port: 36999   #本地端口
+    - slave_port: 36999  #另外一台的端口（二者的端口号都要在1024--65535之间）
+    - password: password123!  #密码
+  tasks:
+    - name: Start up opengauss-master      #安装主节点
+      shell: >-
+        su omm -l -c "echo {{password}} | sh /home/omm/openGauss/install.sh --mode primary -D ~/openGauss/data -R ~/openGauss/install -C 
+        \"replconninfo1='localhost={{master_ip}} localport={{master_port}} remotehost={{slave_ip}} remoteport={{slave_port}}'\" --start"
+- hosts: slave
+  vars:      #定义变量
+    - master_ip: 192.168.100.101  #主节点ip
+    - slave_ip: 192.168.100.102   #从节点ip
+    - master_port: 36999   #本地端口
+    - slave_port: 36999  #另外一台的端口（二者的端口号都要在1024--65535之间）
+    - password: password123!  #密码
+  tasks:
+    - name: Start up opengauss-slave       #安装从节点
+      shell: >-
+        su omm -l -c "echo {{password}} | sh /home/omm/openGauss/install.sh --mode standby -D ~/openGauss/data -R ~/openGauss/install -C 
+        \"replconninfo1='localhost={{slave_ip}} localport={{slave_port}} remotehost={{master_ip}} remoteport={{master_port}}'\" --start"  
